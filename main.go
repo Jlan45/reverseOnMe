@@ -7,10 +7,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
+	"strconv"
 	"sync"
-	"syscall"
-	"time"
 )
 
 var upgrader = websocket.Upgrader{
@@ -21,8 +19,20 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+var HighInt int
+var LowInt int
+
 func init() {
-	os.Getenv("HOST")
+	High := os.Getenv("HIGH")
+	if High == "" {
+		High = "60000"
+	}
+	HighInt, _ = strconv.Atoi(High)
+	Low := os.Getenv("LOW")
+	if Low == "" {
+		Low = "20000"
+	}
+	LowInt, _ = strconv.Atoi(Low)
 }
 func wstotcp(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -31,7 +41,7 @@ func wstotcp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	randPort := rand.Intn(34000) + 20000
+	randPort := rand.Intn(HighInt-LowInt) + LowInt
 	// 假设你想连接的TCP服务器在 localhost:8080 上
 	tcpList, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", randPort))
 	if err != nil {
@@ -50,8 +60,18 @@ func wstotcp(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
+		defer wg.Done()
+		//新开一个buffer存储数据
+		//buffer := make([]byte, 1024)
 		for {
 			_, message, err := conn.ReadMessage()
+			if len(message) == 0 {
+				break
+			}
+			if message[len(message)-1] == 13 {
+				message[len(message)-1] = 10
+			}
+
 			if err != nil {
 				fmt.Println(err)
 				return
@@ -61,6 +81,7 @@ func wstotcp(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	go func() {
+		defer wg.Done()
 		for {
 			buffer := make([]byte, 1024)
 			n, err := tcpConn.Read(buffer)
@@ -71,21 +92,11 @@ func wstotcp(w http.ResponseWriter, r *http.Request) {
 			conn.WriteMessage(websocket.TextMessage, buffer[:n])
 		}
 	}()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case <-sigCh:
-		// 收到信号，关闭连接
-		fmt.Println("Received signal. Closing connection.")
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "已退出"))
-	case <-time.After(time.Second * 10):
-		// 10秒超时，关闭连接
-		fmt.Println("Timeout. Closing connection.")
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "十秒超时"))
-	}
+	select {}
 }
 
 func main() {
 	http.HandleFunc("/wstotcp", wstotcp)
+	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.ListenAndServe(":8081", nil)
 }
