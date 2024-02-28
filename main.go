@@ -2,14 +2,35 @@ package main
 
 import (
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 )
+
+type Connection struct {
+	ID            string
+	Port          int
+	History       string
+	TCPconnection net.Conn
+	TCPlistener   net.Listener
+	WSConnection  map[string]websocket.Conn
+	//Channel chan int
+}
+
+func (c *Connection) createTCPListener() error {
+	tcpList, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", c.Port))
+	fmt.Printf("已在%d端口监听\n", c.Port)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	c.TCPlistener = tcpList
+	return nil
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -18,7 +39,7 @@ var upgrader = websocket.Upgrader{
 		return true
 	},
 }
-
+var connectionList = make(map[string]*Connection)
 var HighInt int
 var LowInt int
 
@@ -34,69 +55,100 @@ func init() {
 	}
 	LowInt, _ = strconv.Atoi(Low)
 }
-func wstotcp(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func wstotcp(c *gin.Context) {
+	id := c.Param("id")
+	connection := connectionList[id]
+	if connection == nil {
+		c.String(404, "连接不存在")
+		return
+	}
+	wsID := getRandID()
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn.SetCloseHandler(func(code int, text string) error {
+		conn.Close()
+		delete(connection.WSConnection, wsID)
+		return nil
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer conn.Close()
-	randPort := rand.Intn(HighInt-LowInt) + LowInt
-	// 假设你想连接的TCP服务器在 localhost:8080 上
-	tcpList, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", randPort))
-	if err != nil {
-		fmt.Println(err)
-		return
+	connection.WSConnection[wsID] = *conn
+	if connection.TCPconnection == nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("端口"+strconv.Itoa(connection.Port)+"监听中...\n"))
 	}
-	fmt.Printf("已在%d端口监听\n", randPort)
-	conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("已在%d端口监听\n", randPort)))
-	defer tcpList.Close()
-	tcpConn, err := tcpList.Accept()
-	conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("已成功建立连接\n")))
-	defer func() {
-		conn.WriteMessage(websocket.TextMessage, []byte("连接已关闭"))
-	}()
-	// 启动两个goroutine，分别用于从WebSocket读取数据并写入TCP连接，以及从TCP连接读取数据并写入WebSocket
-	var wg sync.WaitGroup
-	wg.Add(2)
+	if connection.History != "" {
+		conn.WriteMessage(websocket.TextMessage, []byte("历史消息\n"+connection.History))
+	}
 	go func() {
-		defer wg.Done()
-		//新开一个buffer存储数据
-		//buffer := make([]byte, 1024)
 		for {
-			_, message, err := conn.ReadMessage()
-			if len(message) == 0 {
-				break
-			}
-			if message[len(message)-1] == 13 {
-				message[len(message)-1] = 10
-			}
-
+			_, buffer, err := conn.ReadMessage()
 			if err != nil {
 				fmt.Println(err)
 				return
 			}
-			tcpConn.Write(message)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for {
-			buffer := make([]byte, 1024)
-			n, err := tcpConn.Read(buffer)
-			if err != nil {
-				fmt.Println(err)
-				return
+			connection.History += string(buffer)
+			connection.TCPconnection.Write(buffer)
+			for wsid, wsConn := range connection.WSConnection {
+				if wsid != wsID {
+					wsConn.WriteMessage(websocket.TextMessage, []byte("来自"+wsID+"的消息\n"+string(buffer)+"\n"))
+				}
 			}
-			conn.WriteMessage(websocket.TextMessage, buffer[:n])
 		}
 	}()
 	select {}
 }
+func getRandID() string {
+	randChars := "abcdefghijklmnopqrstuvwxyz1234567890"
+	id := ""
+	for i := 0; i < 8; i++ {
+		id += string(randChars[rand.Intn(len(randChars))])
+	}
+	return id
+}
+func createNewConnection(c *gin.Context) {
+	newConnection := Connection{
+		ID:            getRandID(),
+		Port:          rand.Intn(HighInt-LowInt) + LowInt,
+		TCPconnection: nil,
+		WSConnection:  make(map[string]websocket.Conn),
+		History:       "",
+	}
+	if newConnection.createTCPListener() != nil {
+		//等会在写
+		c.String(200, "创建监听失败（刷新）")
+	}
+	connectionList[newConnection.ID] = &newConnection
+	c.JSON(200, gin.H{"ID": newConnection.ID, "port": newConnection.Port})
+	go func() {
+		for {
+			conn, err := newConnection.TCPlistener.Accept()
+			if err == nil {
+				newConnection.TCPconnection = conn
+			}
+			go func() {
+				buffer := make([]byte, 2048)
+				for {
+					len, err := conn.Read(buffer)
+					if err != nil {
+						fmt.Println(err)
+						return
+					}
+					newConnection.History += string(buffer[:len])
+					for _, wsConn := range newConnection.WSConnection {
+						wsConn.WriteMessage(websocket.TextMessage, (buffer[:len]))
+					}
+				}
+			}()
+		}
+	}()
+}
 
 func main() {
-	http.HandleFunc("/wstotcp", wstotcp)
-	http.Handle("/", http.FileServer(http.Dir("./public")))
-	http.ListenAndServe(":8081", nil)
+	httpServer := gin.Default()
+	httpServer.StaticFS("/public", http.Dir("public"))
+	httpServer.GET("/create", createNewConnection)
+	httpServer.GET("/wstotcp/:id", wstotcp)
+	httpServer.Run(":8080")
 }
