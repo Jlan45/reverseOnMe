@@ -9,10 +9,10 @@ go build -o ReverseOnMe
 ```
 访问8081端口即可
 
-也可以用docker，镜像打包好了明天传
+也可以用docker
 
 ```bash
-docker run -itd -e HIGH="50000" -e LOW="49990" -p 49990-50000:49990-50000 -P reverseonme
+docker run -itd -e HIGH="50000" -e LOW="49990" -p 49990-50000:49990-50000 -P jlan45/reverseonme:amd64
 ```
 API
 ```
