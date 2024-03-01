@@ -7,7 +7,7 @@ LOW="49990"
 go build -o ReverseOnMe
 ./ReverseOnMe
 ```
-访问8081端口即可
+访问8080端口即可
 
 也可以用docker
 
