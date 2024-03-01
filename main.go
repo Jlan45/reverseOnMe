@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 )
 
 type Connection struct {
@@ -57,16 +58,16 @@ func init() {
 }
 func wstotcp(c *gin.Context) {
 	id := c.Param("id")
+	user := c.Query("user")
 	connection := connectionList[id]
 	if connection == nil {
 		c.String(404, "连接不存在")
 		return
 	}
-	wsID := getRandID()
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	conn.SetCloseHandler(func(code int, text string) error {
 		conn.Close()
-		delete(connection.WSConnection, wsID)
+		delete(connection.WSConnection, user)
 		return nil
 	})
 	if err != nil {
@@ -74,9 +75,15 @@ func wstotcp(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
-	connection.WSConnection[wsID] = *conn
+	connection.WSConnection[user] = *conn
 	if connection.TCPconnection == nil {
 		conn.WriteMessage(websocket.TextMessage, []byte("端口"+strconv.Itoa(connection.Port)+"监听中...\n"))
+		for {
+			if connection.TCPconnection != nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
 	}
 	if connection.History != "" {
 		conn.WriteMessage(websocket.TextMessage, []byte("历史消息\n"+connection.History))
@@ -88,11 +95,12 @@ func wstotcp(c *gin.Context) {
 				fmt.Println(err)
 				return
 			}
+			fmt.Println(buffer)
 			connection.History += string(buffer)
 			connection.TCPconnection.Write(buffer)
 			for wsid, wsConn := range connection.WSConnection {
-				if wsid != wsID {
-					wsConn.WriteMessage(websocket.TextMessage, []byte("来自"+wsID+"的消息\n"+string(buffer)+"\n"))
+				if wsid != user {
+					wsConn.WriteMessage(websocket.TextMessage, []byte("来自"+user+"的消息\n"+string(buffer)+"\n"))
 				}
 			}
 		}
@@ -128,8 +136,10 @@ func createNewConnection(c *gin.Context) {
 				newConnection.TCPconnection = conn
 			}
 			go func() {
+				timer := time.NewTimer(5 * time.Second)
 				buffer := make([]byte, 2048)
 				for {
+					timer.Reset(5 * time.Second)
 					len, err := conn.Read(buffer)
 					if err != nil {
 						fmt.Println(err)
@@ -144,9 +154,27 @@ func createNewConnection(c *gin.Context) {
 		}
 	}()
 }
-
+func Cors(c *gin.Context) {
+	method := c.Request.Method
+	origin := c.Request.Header.Get("Origin")
+	if origin != "" {
+		c.Header("Access-Control-Allow-Origin", "*") // 可将将 * 替换为指定的域名
+		c.Header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, UPDATE")
+		c.Header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization")
+		c.Header("Access-Control-Expose-Headers", "Content-Length, Access-Control-Allow-Origin, Access-Control-Allow-Headers, Cache-Control, Content-Language, Content-Type")
+		c.Header("Access-Control-Allow-Credentials", "true")
+	}
+	if method == "OPTIONS" {
+		c.AbortWithStatus(http.StatusNoContent)
+	}
+	c.Next()
+}
 func main() {
 	httpServer := gin.Default()
+	httpServer.Use(Cors)
+	httpServer.GET("/", func(context *gin.Context) {
+		context.Redirect(302, "/public/index.html")
+	})
 	httpServer.StaticFS("/public", http.Dir("public"))
 	httpServer.GET("/create", createNewConnection)
 	httpServer.GET("/wstotcp/:id", wstotcp)
